@@ -1,0 +1,12 @@
+{
+  "mode": "client",
+  "server_host": "127.0.0.1",
+  "server_port": 4433,
+  "listen_host": "127.0.0.1",
+  "listen_port": 8445,
+  "alpn": "quicsmb/1",
+  "insecure_skip_verify": true,
+  "idle_timeout_sec": 300,
+  "max_sessions": 1024,
+  "web_addr": "127.0.0.1:8081"
+}

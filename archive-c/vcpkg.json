@@ -1,0 +1,12 @@
+{
+  "name": "quicsmb",
+  "version": "0.1.0",
+  "description": "SMB3 over QUIC tunnel in C (MsQuic + libevent), modelled after rybaproxy",
+  "dependencies": [
+    "libevent",
+    "openssl",
+    "cjson",
+    "cmocka",
+    "msquic"
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "mode": "server",
+  "quic_port": 4433,
+  "backend_host": "127.0.0.1",
+  "backend_port": 445,
+  "cert_file": "",
+  "key_file": "",
+  "alpn": "quicsmb/1",
+  "idle_timeout_sec": 300,
+  "max_sessions": 1024,
+  "web_addr": "127.0.0.1:8080"
+}
