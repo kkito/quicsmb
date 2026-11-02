@@ -4,6 +4,7 @@ package volume
 
 import (
 	"fmt"
+	"sync"
 
 	"quicsmb/internal/writeback"
 
@@ -15,6 +16,7 @@ import (
 type Fetcher func(file string, index uint64) ([]byte, error)
 
 type Volume struct {
+	mu        sync.RWMutex
 	blockSize int
 	cache     *cache.Cache
 	meta      *metastore.Store
@@ -23,11 +25,41 @@ type Volume struct {
 	capFree   uint64
 }
 
+// Files 快照：当前已知文件名→size（目录同步 + 本地创建 + 落盘恢复的并集）。
+func (v *Volume) Files() map[string]int64 {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	out := make(map[string]int64, len(v.sizes))
+	for k, sz := range v.sizes {
+		out[k] = sz
+	}
+	return out
+}
+
+// SetFile 记录远端文件（目录同步用；只放大不缩小，避免回写中的本地版本被覆盖）。
+func (v *Volume) SetFile(file string, size int64) {
+	if file == "" {
+		return
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if size > v.sizes[file] {
+		v.sizes[file] = size
+	}
+}
+
 func New(blockSize int, c *cache.Cache, meta *metastore.Store) *Volume {
-	return &Volume{blockSize: blockSize, cache: c, meta: meta, sizes: map[string]int64{}}
+	v := &Volume{blockSize: blockSize, cache: c, meta: meta, sizes: map[string]int64{}}
+	for f, sz := range meta.Files() {
+		v.sizes[f] = sz
+	}
+	c.SetIsDirty(func(k cache.Key) bool { return meta.IsDirty(k.File, k.Index) })
+	return v
 }
 
 func (v *Volume) Size(file string) int64 {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
 	return v.sizes[file]
 }
 
@@ -90,8 +122,13 @@ func (v *Volume) WriteAt(file string, off int64, p []byte, nowUnix int64) (int, 
 			break
 		}
 	}
-	if end := off + int64(done); end > v.sizes[file] {
-		v.sizes[file] = end
+	if end := off + int64(done); end > v.Size(file) {
+		v.mu.Lock()
+		if end > v.sizes[file] {
+			v.sizes[file] = end
+		}
+		v.meta.SetFile(file, v.sizes[file])
+		v.mu.Unlock()
 	}
 	return done, nil
 }
@@ -135,12 +172,19 @@ func (v *Volume) Truncate(file string, size int64) {
 	if size < 0 {
 		size = 0
 	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
 	v.sizes[file] = size
+	v.meta.SetFile(file, size)
 }
 
 func (v *Volume) TouchDirty(file string, nowUnix int64) error {
 	for idx := range v.dirtyBlocks(file) {
 		v.meta.MarkDirty(file, idx, 0, nowUnix)
+	}
+	// 空洞文件（比如纯 O_TRUNC）：至少标第 0 块，保证回写能感知到它。
+	if len(v.dirtyBlocks(file)) == 0 && file != "" {
+		v.meta.MarkDirty(file, 0, 0, nowUnix)
 	}
 	return nil
 }

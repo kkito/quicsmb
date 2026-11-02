@@ -66,13 +66,9 @@ func main() {
 	}
 	vol := volume.New(chunk.DefaultBlockSize, cache.New(20<<30, chunk.DefaultBlockSize), meta)
 
-	fetch := func(file string, index uint64) ([]byte, error) {
-		return make([]byte, chunk.DefaultBlockSize), nil
-	}
-
 	var mnt *mount.Server
 	if mountpoint != "" {
-		mnt, err = mount.Mount(mountpoint, vol, fetch)
+		mnt, err = mount.Mount(mountpoint, vol, fetchViaHome)
 		if err != nil {
 			log.Fatalf("mount: %v", err)
 		}
@@ -86,6 +82,7 @@ func main() {
 		log.Fatalf("listen: %v", err)
 	}
 	go writebackLoop(vol, meta, writebackPolicyFromEnv())
+	go syncLoop(vol)
 	go func() {
 		for {
 			c, err := lis.Accept(context.Background())
@@ -148,3 +145,16 @@ func writebackLoop(vol *volume.Volume, meta *metastore.Store, pol writeback.Poli
 func pushBlock(file string, index uint64, data []byte) error {
 	return pushViaHome(xfer.Msg{Op: xfer.OpPushReq, File: file, Index: index, Data: data})
 }
+// syncLoop 等家里连上后拉文件列表 + 容量；之后每 5 分钟重同步一次。
+// （P1-5 目录同步 + P2-12 容量刷新）
+func syncLoop(vol *Volume) {
+	for {
+		time.Sleep(30 * time.Second)
+		if getHome() == nil {
+			continue
+		}
+		syncFileList(vol)
+	}
+}
+
+type Volume = volume.Volume

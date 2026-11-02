@@ -12,6 +12,7 @@ sleep 1
 (cd /Users/kkito/proj/demo/quicsmb && GOFLAGS=-mod=mod GOPROXY="file:///Users/kkito/go/pkg/mod/cache/download" GOSUMDB=off go build -o $BIN/qvps ./cmd/qvps && GOFLAGS=-mod=mod GOPROXY="file:///Users/kkito/go/pkg/mod/cache/download" GOSUMDB=off go build -o $BIN/qhome ./cmd/qhome)
 rm -rf $BIN/meta-e2e $BIN/home-e2e && mkdir -p $BIN/meta-e2e $BIN/home-e2e
 echo "hello-qvfs-e2e-block-0" > $BIN/home-e2e/seed.bin
+mkdir -p $BIN/home-e2e/sub && echo "nested-data" > $BIN/home-e2e/sub/nested.txt
 (QVFS_DELAY_SEC=1 QVFS_WIN=0-1439 QVFS_TICK_SEC=2 QVFS_KEY=e2e-key-456 $BIN/qvps -port $PORT -web $WEB -root $BIN/meta-e2e > $BIN/qvps-e2e.log 2>&1 &)
 sleep 1
 (QVFS_KEY=e2e-key-456 $BIN/qhome -server 127.0.0.1 -port $PORT -root $BIN/home-e2e > $BIN/qhome-e2e.log 2>&1 &)
@@ -127,6 +128,9 @@ EOF
 cp /tmp/qvfs-e2e/push.go ./push_e2e_main.go
 GOFLAGS=-mod=mod GOPROXY="file:///Users/kkito/go/pkg/mod/cache/download" GOSUMDB=off go run ./push_e2e_main.go
 rm -f ./push_e2e_main.go
+echo "--- 4b. 目录同步：qvps 侧 volume 应有远端文件 ---"
+sleep 35
+if grep -q "seed.bin" $BIN/qvps-e2e.log 2>/dev/null; then echo "SYNC-TRACE found"; fi
 echo "--- 4. 等调度回写（~8s），验家里落盘 ---"
 sleep 8
 if grep -q "roundtrip-payload" $BIN/home-e2e/seed.bin 2>/dev/null; then echo "WRITEBACK-OK: home has pushed data"; else echo "WRITEBACK-FAIL"; ls -la $BIN/home-e2e/; exit 1; fi

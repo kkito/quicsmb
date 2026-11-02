@@ -3,6 +3,7 @@ package disk
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -81,4 +82,35 @@ func (r *Root) Size(file string) int64 {
 		return 0
 	}
 	return st.Size()
+}
+
+// FileEntry 是目录同步的一项：相对路径 + 大小。
+type FileEntry struct {
+	Name string
+	Size int64
+}
+
+// List 递归扫 root 下所有常规文件，返回相对路径（slash 分隔）+ 大小。
+// 忽略符号链接与非常规文件，避免逃逸。
+func (r *Root) List() ([]FileEntry, error) {
+	var out []FileEntry
+	err := filepath.WalkDir(r.root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil // 单个坏项跳过，不中断整表
+		}
+		if d.IsDir() || d.Type()&fs.ModeSymlink != 0 {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil || !info.Mode().IsRegular() {
+			return nil
+		}
+		rel, err := filepath.Rel(r.root, p)
+		if err != nil {
+			return nil
+		}
+		out = append(out, FileEntry{Name: filepath.ToSlash(rel), Size: info.Size()})
+		return nil
+	})
+	return out, err
 }

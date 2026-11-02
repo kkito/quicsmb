@@ -17,8 +17,13 @@ type entry struct {
 	heat uint64
 }
 
+// IsDirty 报告 key 是否为脏（由 volume 注入；nil 表示全干净）。
+// 淘汰时跳过脏块：脏数据只在内存，回写前淘汰=丢数据。
+type IsDirty func(k Key) bool
+
 type Cache struct {
-	mu    sync.Mutex
+	mu      sync.Mutex
+	isDirty IsDirty
 	cap   int64
 	used  int64
 	ll    *list.List
@@ -30,6 +35,17 @@ type Cache struct {
 func New(capBytes int64, blockSize int) *Cache {
 	_ = blockSize
 	return &Cache{cap: capBytes, ll: list.New(), items: map[Key]*list.Element{}}
+}
+
+// SetIsDirty 注入脏判断（volume 侧按 metastore 实现）。
+func (c *Cache) SetIsDirty(fn IsDirty) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.isDirty = fn
+}
+
+func (c *Cache) dirtyLocked(k Key) bool {
+	return c.isDirty != nil && c.isDirty(k)
 }
 
 func (c *Cache) Put(k Key, data []byte) {
@@ -47,7 +63,7 @@ func (c *Cache) Put(k Key, data []byte) {
 	c.used += int64(len(cp))
 	for c.used > c.cap {
 		if !c.evictOldestLocked() {
-			break
+			break // 全脏：配额暂时超限，等待回写释放（超限可观测，见 Usage）
 		}
 	}
 }
@@ -74,15 +90,18 @@ func (c *Cache) EvictOldest() bool {
 }
 
 func (c *Cache) evictOldestLocked() bool {
-	back := c.ll.Back()
-	if back == nil {
-		return false
+	// 从最老往前找第一个干净块；全脏则拒绝淘汰（调用方决定溢出落盘）。
+	for el := c.ll.Back(); el != nil; el = el.Prev() {
+		e := el.Value.(*entry)
+		if c.dirtyLocked(e.key) {
+			continue
+		}
+		delete(c.items, e.key)
+		c.used -= int64(len(e.data))
+		c.ll.Remove(el)
+		return true
 	}
-	e := back.Value.(*entry)
-	delete(c.items, e.key)
-	c.used -= int64(len(e.data))
-	c.ll.Remove(back)
-	return true
+	return false
 }
 
 func (c *Cache) Usage() (int64, int) {

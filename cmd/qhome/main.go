@@ -94,6 +94,22 @@ func run(ctx context.Context, server string, port int, key []byte, d *disk.Root)
 			if err := xfer.Encode(st, xfer.Msg{Op: xfer.OpPushAck, File: m.File, Index: m.Index}); err != nil {
 				return err
 			}
+		case xfer.OpListReq:
+			files, err := d.List()
+			if err != nil {
+				return err
+			}
+			es := make([]xfer.FileEntry, 0, len(files))
+			for _, f := range files {
+				es = append(es, xfer.FileEntry{Name: f.Name, Size: f.Size})
+			}
+			payload, err := xfer.EncodeList(es)
+			if err != nil {
+				return err
+			}
+			if err := xfer.Encode(st, xfer.Msg{Op: xfer.OpListResp, Data: payload}); err != nil {
+				return err
+			}
 		}
 	}
 }

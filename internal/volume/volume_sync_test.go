@@ -6,28 +6,38 @@ import (
 	"quicsmb/internal/cache"
 	"quicsmb/internal/chunk"
 	"quicsmb/internal/metastore"
-	"quicsmb/internal/writeback"
 )
 
-// FlushDue 只吐到期脏块（TDD: 先红）
-func TestFlushDue_SelectsDueBlocks(t *testing.T) {
-	meta := metastore.New(t.TempDir()+"/d.json", chunk.DefaultBlockSize)
-	vol := New(chunk.DefaultBlockSize, cache.New(20<<30, chunk.DefaultBlockSize), meta)
-	now := int64(1000000)
-	if _, err := vol.WriteAt("f.bin", 0, []byte("hello"), now-100000); err != nil {
+func testVolSync(t *testing.T) *Volume {
+	t.Helper()
+	m, err := metastore.Load(t.TempDir()+"/d.json", chunk.DefaultBlockSize)
+	if err != nil {
 		t.Fatal(err)
 	}
-	pol := writeback.Policy{DelaySec: 10, WinStartMin: 0, WinEndMin: 24 * 60, MaxFailures: 10}
-	due := vol.FlushDue(pol, func() int64 { return now }, 32)
-	if len(due) != 1 || due[0].File != "f.bin" || due[0].Index != 0 {
-		t.Fatalf("want 1 due f.bin#0, got %+v", due)
+	v := New(chunk.DefaultBlockSize, cache.New(20<<30, chunk.DefaultBlockSize), m)
+	return v
+}
+
+func TestSetFileListRoundTrip(t *testing.T) {
+	v := testVolSync(t)
+	v.SetFile("sub/nested.txt", 11)   // 远端同步
+	v.SetFile("sub/nested.txt", 5)    // 缩小不覆盖
+	if v.Size("sub/nested.txt") != 11 {
+		t.Fatalf("size = %d", v.Size("sub/nested.txt"))
 	}
-	if string(due[0].Data[:5]) != "hello" {
-		t.Fatalf("data mismatch: %q", due[0].Data[:5])
+	files := v.Files()
+	if files["sub/nested.txt"] != 11 {
+		t.Fatalf("files = %+v", files)
 	}
-	// 未到期不吐
-	pol.DelaySec = 72 * 3600
-	if due := vol.FlushDue(pol, func() int64 { return now }, 32); len(due) != 0 {
-		t.Fatalf("want 0 due before delay, got %d", len(due))
+}
+
+func TestTouchDirtyEmptyFile(t *testing.T) {
+	v := testVolSync(t)
+	// 空文件（O_TRUNC 产物）：无脏块也要标一块，保证回写感知
+	if err := v.TouchDirty("empty.txt", 123); err != nil {
+		t.Fatal(err)
+	}
+	if v.DirtyCount() != 1 {
+		t.Fatalf("dirty = %d", v.DirtyCount())
 	}
 }

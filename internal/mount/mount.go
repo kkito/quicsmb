@@ -5,6 +5,7 @@ package mount
 
 import (
 	"context"
+	"strings"
 	"syscall"
 
 	"github.com/hanwen/go-fuse/v2/fs"
@@ -27,58 +28,142 @@ func (f *FS) SetCapacity(total, free uint64) {
 	f.freeBytes = free
 }
 
-type rootNode struct {
-	fs.Inode
-	f *FS
-}
-
 type fileNode struct {
 	fs.Inode
 	f    *FS
 	name string
 }
 
-func (r *rootNode) fillEntry(name string, out *fuse.EntryOut) {
+// dirNode 是子目录节点：名字为相对 root 的目录路径（""=root）。
+type dirNode struct {
+	fs.Inode
+	f   *FS
+	dir string
+}
+
+// childrenOf 列 dir 下的直接子项（文件 + 子目录），来源：
+// volume 文件列表（目录同步/本地创建/重启恢复）+ 已具现节点。
+func (f *FS) childrenOf(dir string) (files, dirs map[string]bool) {
+	files = map[string]bool{}
+	dirs = map[string]bool{}
+	prefix := dir
+	if prefix != "" {
+		prefix += "/"
+	}
+	for name := range f.vol.Files() {
+		rest, ok := strings.CutPrefix(name, prefix)
+		if !ok {
+			continue
+		}
+		if i := strings.IndexByte(rest, '/'); i < 0 {
+			if rest != "" {
+				files[rest] = true
+			}
+		} else if rest[:i] != "" {
+			dirs[rest[:i]] = true
+		}
+	}
+	return files, dirs
+}
+
+func (f *FS) fillFileEntry(name string, out *fuse.EntryOut) {
 	out.SetAttrTimeout(0)
 	out.SetEntryTimeout(0)
 	out.Attr.FromStat(&syscall.Stat_t{
 		Mode:  syscall.S_IFREG | 0o644,
-		Size:  r.f.vol.Size(name),
+		Size:  f.vol.Size(name),
 		Nlink: 1,
 	})
 }
 
-func (r *rootNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	if ch := r.GetChild(name); ch != nil {
-		r.fillEntry(name, out)
+func (f *FS) fillDirEntry(out *fuse.EntryOut) {
+	out.SetAttrTimeout(0)
+	out.SetEntryTimeout(0)
+	out.Attr.FromStat(&syscall.Stat_t{
+		Mode:  syscall.S_IFDIR | 0o755,
+		Nlink: 2,
+	})
+}
+
+func (d *dirNode) fullName(name string) string {
+	if d.dir == "" {
+		return name
+	}
+	return d.dir + "/" + name
+}
+
+func (d *dirNode) lookupChild(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	if ch := d.GetChild(name); ch != nil {
+		if fn, ok := ch.Operations().(*fileNode); ok {
+			d.f.fillFileEntry(fn.name, out)
+		} else {
+			d.f.fillDirEntry(out)
+		}
+		return ch, 0
+	}
+	full := d.fullName(name)
+	files, dirs := d.f.childrenOf(d.dir)
+	if files[name] {
+		ch := d.NewPersistentInode(ctx, &fileNode{f: d.f, name: full}, fs.StableAttr{Mode: syscall.S_IFREG})
+		d.AddChild(name, ch, true)
+		d.f.fillFileEntry(full, out)
+		return ch, 0
+	}
+	if dirs[name] {
+		ch := d.NewPersistentInode(ctx, &dirNode{f: d.f, dir: full}, fs.StableAttr{Mode: syscall.S_IFDIR})
+		d.AddChild(name, ch, true)
+		d.f.fillDirEntry(out)
 		return ch, 0
 	}
 	return nil, syscall.ENOENT
 }
 
-func (r *rootNode) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (*fs.Inode, fs.FileHandle, uint32, syscall.Errno) {
-	ch := r.GetChild(name)
+func (d *dirNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	return d.lookupChild(ctx, name, out)
+}
+
+func (d *dirNode) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (*fs.Inode, fs.FileHandle, uint32, syscall.Errno) {
+	ch := d.GetChild(name)
 	if ch == nil {
-		ch = r.NewPersistentInode(ctx, &fileNode{f: r.f, name: name}, fs.StableAttr{Mode: syscall.S_IFREG})
-		r.AddChild(name, ch, true)
+		full := d.fullName(name)
+		ch = d.NewPersistentInode(ctx, &fileNode{f: d.f, name: full}, fs.StableAttr{Mode: syscall.S_IFREG})
+		d.AddChild(name, ch, true)
 	}
-	r.fillEntry(name, out)
+	d.f.fillFileEntry(d.fullName(name), out)
 	return ch, nil, 0, 0
 }
 
-func (r *rootNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
+func (d *dirNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	out.Mode = syscall.S_IFDIR | 0o755
 	out.Nlink = 2
 	return 0
 }
 
-func (r *rootNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
+func (d *dirNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
+	files, dirs := d.f.childrenOf(d.dir)
 	var ents []fuse.DirEntry
-	for name := range r.Children() {
+	for name := range d.Children() {
+		if op := d.GetChild(name).Operations(); op != nil {
+			if _, ok := op.(*dirNode); ok {
+				ents = append(ents, fuse.DirEntry{Name: name, Mode: syscall.S_IFDIR})
+			} else {
+				ents = append(ents, fuse.DirEntry{Name: name, Mode: syscall.S_IFREG})
+			}
+			delete(files, name)
+			delete(dirs, name)
+		}
+	}
+	for name := range files {
 		ents = append(ents, fuse.DirEntry{Name: name, Mode: syscall.S_IFREG})
+	}
+	for name := range dirs {
+		ents = append(ents, fuse.DirEntry{Name: name, Mode: syscall.S_IFDIR})
 	}
 	return fs.NewListDirStream(ents), 0
 }
+
+// rootNode 是挂载入口（dir "" 的别名），供 Mount 使用。
+type rootNode = dirNode
 
 func (n *fileNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	out.Mode = syscall.S_IFREG | 0o644

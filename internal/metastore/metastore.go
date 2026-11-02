@@ -17,8 +17,9 @@ type DirtyEntry struct {
 }
 
 type diskForm struct {
-	BlockSize int          `json:"block_size"`
-	Entries   []DirtyEntry `json:"entries"`
+	BlockSize int              `json:"block_size"`
+	Entries   []DirtyEntry     `json:"entries"`
+	Files     map[string]int64 `json:"files,omitempty"`
 }
 
 type Store struct {
@@ -26,6 +27,7 @@ type Store struct {
 	path      string
 	blockSize int
 	items     map[string]*DirtyEntry
+	files     map[string]int64
 }
 
 func key(file string, index uint64) string {
@@ -33,7 +35,35 @@ func key(file string, index uint64) string {
 }
 
 func New(path string, blockSize int) *Store {
-	return &Store{path: path, blockSize: blockSize, items: map[string]*DirtyEntry{}}
+	return &Store{path: path, blockSize: blockSize, items: map[string]*DirtyEntry{}, files: map[string]int64{}}
+}
+
+// SetFile 记录文件 size（内存 + 落盘由 Save 统一做）。
+func (s *Store) SetFile(file string, size int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if size > s.files[file] {
+		s.files[file] = size
+	}
+}
+
+// Files 快照：volume 启动恢复用。
+func (s *Store) Files() map[string]int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[string]int64, len(s.files))
+	for k, v := range s.files {
+		out[k] = v
+	}
+	return out
+}
+
+// IsDirty 供 cache 淘汰保护查询。
+func (s *Store) IsDirty(file string, index uint64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.items[key(file, index)]
+	return ok
 }
 
 func Load(path string, blockSize int) (*Store, error) {
@@ -55,6 +85,16 @@ func Load(path string, blockSize int) (*Store, error) {
 	for _, e := range f.Entries {
 		cp := e
 		s.items[key(e.File, e.Index)] = &cp
+	}
+	s.files = f.Files
+	if s.files == nil {
+		s.files = map[string]int64{}
+	}
+	// 脏块反推文件存在（老版本 dirty.json 无 files 段时恢复列表）
+	for _, e := range f.Entries {
+		if _, ok := s.files[e.File]; !ok {
+			s.files[e.File] = 0
+		}
 	}
 	return s, nil
 }
@@ -97,7 +137,7 @@ func (s *Store) List() []DirtyEntry {
 func (s *Store) Save() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	f := diskForm{BlockSize: s.blockSize}
+	f := diskForm{BlockSize: s.blockSize, Files: s.files}
 	for _, e := range s.items {
 		f.Entries = append(f.Entries, *e)
 	}

@@ -25,18 +25,6 @@ type fetchResp struct {
 	err  error
 }
 
-// fetchStream 是 qfetch 二进制的“家里回源 uniq 通道”：VPS 侧 FUSE 读未命中时
-// 把 FetchReq 编进此 stream，qhome 从大盘读回 FetchResp。
-// 无连接时返回 error，volume 转 EIO（设计 §5）。
-var fetchStreamMu sync.Mutex
-var fetchStream *quic.Stream
-
-func setFetchStream(st *quic.Stream) {
-	fetchStreamMu.Lock()
-	defer fetchStreamMu.Unlock()
-	fetchStream = st
-}
-
 func fetchViaHome(file string, index uint64) ([]byte, error) {
 	h := getHome()
 	if h == nil {
@@ -44,11 +32,12 @@ func fetchViaHome(file string, index uint64) ([]byte, error) {
 	}
 	resp := make(chan fetchResp, 1)
 	h.pendMu.Lock()
-	h.pend[index] = resp
+	k := pendKey(file, index)
+	h.pend[k] = resp
 	h.pendMu.Unlock()
 	if err := h.write(xfer.Msg{Op: xfer.OpFetchReq, File: file, Index: index}); err != nil {
 		h.pendMu.Lock()
-		delete(h.pend, index)
+		delete(h.pend, k)
 			h.pendMu.Unlock()
 		return nil, err
 	}
@@ -57,7 +46,7 @@ func fetchViaHome(file string, index uint64) ([]byte, error) {
 		return r.data, r.err
 	case <-time.After(60 * time.Second):
 		h.pendMu.Lock()
-		delete(h.pend, index)
+		delete(h.pend, k)
 			h.pendMu.Unlock()
 		return nil, io.ErrUnexpectedEOF
 	}
@@ -71,11 +60,12 @@ func pushViaHome(m xfer.Msg) error {
 	}
 	ack := make(chan error, 1)
 	h.ackMu.Lock()
-	h.acks[m.Index] = ack
+	k := pendKey(m.File, m.Index)
+	h.acks[k] = ack
 	h.ackMu.Unlock()
 	if err := h.write(m); err != nil {
 		h.ackMu.Lock()
-		delete(h.acks, m.Index)
+		delete(h.acks, k)
 			h.ackMu.Unlock()
 		return err
 	}
@@ -84,7 +74,7 @@ func pushViaHome(m xfer.Msg) error {
 		return err
 	case <-time.After(60 * time.Second):
 		h.ackMu.Lock()
-		delete(h.acks, m.Index)
+		delete(h.acks, k)
 		h.ackMu.Unlock()
 		return io.ErrUnexpectedEOF
 	}
@@ -102,13 +92,25 @@ func serveQUIC(c *quic.Conn, key []byte, vol *volume.Volume) {
 }
 
 // homeConn 是当前 qhome 连接的写端（VPS→家里唯一出口，stream 写需串行）。
+// pendKey 区分文件：同块号不同文件并发回源不串味（P0-4）。
+func pendKey(file string, index uint64) string {
+	return file + "\x00" + string(rune(index>>32)) + string(rune(index))
+}
+
 type homeConn struct {
 	st     *quic.Stream
 	mu     sync.Mutex
 	pendMu sync.Mutex
-	pend   map[uint64]chan fetchResp // FetchResp 等待者（按块号）
+	pend   map[string]chan fetchResp // FetchResp 等待者（按 file#index）
 	ackMu  sync.Mutex
-	acks   map[uint64]chan error     // PushAck 等待者（按块号）
+	acks   map[string]chan error // PushAck 等待者（按 file#index）
+	listMu sync.Mutex
+	listCh chan listResp // OpListResp 等待者（同时只允许一个在途）
+}
+
+type listResp struct {
+	data []byte
+	err  error
 }
 
 var homeMu sync.Mutex
@@ -136,11 +138,9 @@ func (h *homeConn) write(m xfer.Msg) error {
 // 回写调度经此发 PushReq 落盘；读泵按 Index 分发 FetchResp/PushAck。
 // （设计 §2: 回源与回写都由 VPS 发起、家里响应）
 func homeLoop(st *quic.Stream, vol *volume.Volume) {
-	h := &homeConn{st: st, pend: map[uint64]chan fetchResp{}, acks: map[uint64]chan error{}}
-	setFetchStream(st)
+	h := &homeConn{st: st, pend: map[string]chan fetchResp{}, acks: map[string]chan error{}}
 	setHome(h)
 	defer setHome(nil)
-	defer setFetchStream(nil)
 	for {
 		m, err := xfer.Decode(st)
 		if err != nil {
@@ -149,19 +149,27 @@ func homeLoop(st *quic.Stream, vol *volume.Volume) {
 		switch m.Op {
 		case xfer.OpFetchResp:
 			h.pendMu.Lock()
-			w := h.pend[m.Index]
-			delete(h.pend, m.Index)
+			w := h.pend[pendKey(m.File, m.Index)]
+			delete(h.pend, pendKey(m.File, m.Index))
 			h.pendMu.Unlock()
 			if w != nil {
 				w <- fetchResp{data: m.Data}
 			}
 		case xfer.OpPushAck:
 			h.ackMu.Lock()
-			w := h.acks[m.Index]
-			delete(h.acks, m.Index)
+			w := h.acks[pendKey(m.File, m.Index)]
+			delete(h.acks, pendKey(m.File, m.Index))
 			h.ackMu.Unlock()
 			if w != nil {
 				w <- nil
+			}
+		case xfer.OpListResp:
+			h.listMu.Lock()
+			w := h.listCh
+			h.listCh = nil
+			h.listMu.Unlock()
+			if w != nil {
+				w <- listResp{data: m.Data}
 			}
 		}
 	}
@@ -227,3 +235,42 @@ func serveStream(st *quic.Stream, key []byte, vol *volume.Volume) {
 }
 
 func blockSize() int { return 512 << 10 }
+
+// requestFileList 向家里索要文件列表（目录同步），60s 超时。
+func requestFileList() ([]xfer.FileEntry, error) {
+	h := getHome()
+	if h == nil {
+		return nil, io.ErrUnexpectedEOF
+	}
+	ch := make(chan listResp, 1)
+	h.listMu.Lock()
+	h.listCh = ch
+	h.listMu.Unlock()
+	if err := h.write(xfer.Msg{Op: xfer.OpListReq}); err != nil {
+		h.listMu.Lock()
+		h.listCh = nil
+			h.listMu.Unlock()
+		return nil, err
+	}
+	select {
+	case r := <-ch:
+		return xfer.DecodeList(r.data)
+	case <-time.After(60 * time.Second):
+		h.listMu.Lock()
+		h.listCh = nil
+			h.listMu.Unlock()
+		return nil, io.ErrUnexpectedEOF
+	}
+}
+
+// syncFileList 拉家里列表 → volume.SetFile；失败只记日志，下轮继续。
+func syncFileList(vol *volume.Volume) {
+	list, err := requestFileList()
+	if err != nil {
+		log.Printf("qvps: filelist: %v", err)
+		return
+	}
+	for _, e := range list {
+		vol.SetFile(e.Name, e.Size)
+	}
+}
