@@ -123,15 +123,9 @@ func run(ctx context.Context, server string, port int, key []byte, d *disk.Root)
 				return err
 			}
 		case xfer.OpListReq:
-			files, err := d.List()
-			if err != nil {
-				return err
-			}
-			es := make([]xfer.FileEntry, 0, len(files))
-			for _, f := range files {
-				es = append(es, xfer.FileEntry{Name: f.Name, Size: f.Size})
-			}
-			payload, err := xfer.EncodeList(es)
+			// 已废弃（整盘下全量 List 2.3M 文件直接 OoM 级别）：回空表，
+			// 调用方（旧 qvps syncLoop）收到空表只记日志，不炸连接。
+			payload, err := xfer.EncodeList(nil)
 			if err != nil {
 				return err
 			}
