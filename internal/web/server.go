@@ -48,9 +48,15 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	ok(w, map[string]any{"status": "ok"})
 }
 
+// QvfsStats 是 qvps Manager 可选实现的能力：返回缓存/脏块统计。
+// 用 type-assert 保持对旧 Manager（quicsmb 隧道）的兼容。
+type QvfsStats interface {
+	Qvfs() map[string]any
+}
+
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	rx, tx := s.m.Totals()
-	ok(w, map[string]any{
+	body := map[string]any{
 		"mode":     s.mode,
 		"sessions": s.m.Count(),
 		"stats": map[string]any{
@@ -58,7 +64,11 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			"txBytes": tx,
 		},
 		"version": s.version,
-	})
+	}
+	if q, ok := s.m.(QvfsStats); ok {
+		body["qvfs"] = q.Qvfs()
+	}
+	ok(w, body)
 }
 
 func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {

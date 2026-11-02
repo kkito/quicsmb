@@ -120,3 +120,35 @@ func TestIndexHTML(t *testing.T) {
 	}
 	_ = webdist.MustAsset
 }
+
+type qvfsFakeManager struct {
+	fakeManager
+}
+
+func (f *qvfsFakeManager) Qvfs() map[string]any {
+	return map[string]any{"dirty": 3, "hitRate": 0.5}
+}
+
+func TestStatusWithQvfs(t *testing.T) {
+	m := &qvfsFakeManager{fakeManager: fakeManager{rx: 1, tx: 2}}
+	r := NewRouter(m, "qvfs", "qvps")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest("GET", "/api/status", nil))
+	v := decode(t, w)
+	d := v["data"].(map[string]any)
+	q, ok := d["qvfs"].(map[string]any)
+	if !ok || q["dirty"].(float64) != 3 {
+		t.Fatalf("qvfs = %v", d["qvfs"])
+	}
+}
+
+func TestStatusWithoutQvfsStaysCompatible(t *testing.T) {
+	r := newRouter()
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest("GET", "/api/status", nil))
+	v := decode(t, w)
+	d := v["data"].(map[string]any)
+	if _, ok := d["qvfs"]; ok {
+		t.Fatalf("legacy manager must not have qvfs: %v", d)
+	}
+}

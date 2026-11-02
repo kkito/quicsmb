@@ -8,7 +8,6 @@ import (
 	"github.com/quic-go/quic-go"
 
 	"quicsmb/internal/auth"
-	"quicsmb/internal/cache"
 	"quicsmb/internal/chunk"
 	"quicsmb/internal/volume"
 	"quicsmb/internal/xfer"
@@ -48,10 +47,18 @@ func serveStream(st *quic.Stream, key []byte, vol *volume.Volume) {
 		}
 		switch m.Op {
 		case xfer.OpFetchReq:
-			k := cache.Key{File: m.File, Index: m.Index}
-			_ = k
-			b := make([]byte, chunk.DefaultBlockSize)
-			if err := xfer.Encode(st, xfer.Msg{Op: xfer.OpFetchResp, File: m.File, Index: m.Index, Data: b}); err != nil {
+			if m.File == "" {
+				continue // 握手帧已消费，无需回包
+			}
+			buf := make([]byte, chunk.DefaultBlockSize)
+			// e2e/单机模式：无上游回源，未命中回填零块（VPS→家里回源是下一步工作）。
+			fetch := func(file string, index uint64) ([]byte, error) {
+				return make([]byte, chunk.DefaultBlockSize), nil
+			}
+			if _, err := vol.ReadAt(m.File, int64(m.Index)*int64(chunk.DefaultBlockSize), buf, fetch); err != nil {
+				return
+			}
+			if err := xfer.Encode(st, xfer.Msg{Op: xfer.OpFetchResp, File: m.File, Index: m.Index, Data: buf}); err != nil {
 				return
 			}
 		case xfer.OpPushReq:

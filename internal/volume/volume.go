@@ -91,3 +91,7 @@ func (v *Volume) WriteAt(file string, off int64, p []byte, nowUnix int64) (int, 
 	}
 	return done, nil
 }
+
+func (v *Volume) Usage() (int64, int) { return v.cache.Usage() }
+func (v *Volume) HitRate() float64    { return v.cache.HitRate() }
+func (v *Volume) DirtyCount() int     { return len(v.meta.List()) }

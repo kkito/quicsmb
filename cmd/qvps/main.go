@@ -28,6 +28,18 @@ func (m *qvfsMgr) Logs(l int) []session.LogEntry { return m.reg.Logs(l) }
 func (m *qvfsMgr) Count() int                    { return m.reg.Count() }
 func (m *qvfsMgr) Totals() (uint64, uint64)      { return m.reg.Totals() }
 
+func (m *qvfsMgr) Qvfs() map[string]any {
+	var used int64
+	var n, dirty int
+	var rate float64
+	if m.vol != nil {
+		used, n = m.vol.Usage()
+		rate = m.vol.HitRate()
+		dirty = m.vol.DirtyCount()
+	}
+	return map[string]any{"blocks": n, "usedBytes": used, "dirty": dirty, "hitRate": rate}
+}
+
 func main() {
 	var mountpoint, root, addr string
 	var port int
