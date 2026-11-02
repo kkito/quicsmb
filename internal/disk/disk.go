@@ -90,13 +90,27 @@ type FileEntry struct {
 	Size int64
 }
 
+// skipDirNames 是 List 跳过的顶层目录（docker 层文件几十万 + 需 root 权限，
+// 同步进来既慢又没意义；lost+found 同理）。
+var skipDirNames = map[string]bool{"docker": true, "lost+found": true}
+
 // List 递归扫 root 下所有常规文件，返回相对路径（slash 分隔）+ 大小。
-// 忽略符号链接与非常规文件，避免逃逸。
+// 忽略符号链接与非常规文件，避免逃逸；无权限/坏项跳过不中断。
 func (r *Root) List() ([]FileEntry, error) {
 	var out []FileEntry
 	err := filepath.WalkDir(r.root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
+			if d != nil && d.IsDir() {
+				return filepath.SkipDir // 无权限目录：剪枝
+			}
 			return nil // 单个坏项跳过，不中断整表
+		}
+		if d.IsDir() && p != r.root {
+			if rel, rerr := filepath.Rel(r.root, p); rerr == nil {
+				if skipDirNames[filepath.ToSlash(rel)] {
+					return filepath.SkipDir
+				}
+			}
 		}
 		if d.IsDir() || d.Type()&fs.ModeSymlink != 0 {
 			return nil
