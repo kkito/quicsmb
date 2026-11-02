@@ -173,6 +173,7 @@ func homeLoop(st *quic.Stream, vol *volume.Volume) {
 			}
 		case xfer.OpStatfsReq:
 			// 家里连上后上报的大盘容量（之前漏接：df 一直显示兜底 1G）
+			log.Printf("qvps: statfs from home: %d bytes", len(m.Data))
 			if len(m.Data) == 16 {
 				total := binary.BigEndian.Uint64(m.Data[0:8])
 				free := binary.BigEndian.Uint64(m.Data[8:16])

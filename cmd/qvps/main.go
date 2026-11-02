@@ -138,8 +138,11 @@ func writebackLoop(vol *volume.Volume, meta *metastore.Store, pol writeback.Poli
 				meta.MarkClean(b.File, b.Index)
 				if !trunced[b.File] {
 					trunced[b.File] = true
-					if err := truncViaHome(b.File, vol.Size(b.File)); err != nil {
-						log.Printf("qvps: trunc %s: %v", b.File, err)
+					sz := vol.Size(b.File)
+					if err := truncViaHome(b.File, sz); err != nil {
+						log.Printf("qvps: trunc %s size=%d: %v", b.File, sz, err)
+					} else {
+						log.Printf("qvps: pushed %s size=%d", b.File, sz)
 					}
 				}
 			}
