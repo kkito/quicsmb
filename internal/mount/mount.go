@@ -16,6 +16,15 @@ import (
 type FS struct {
 	vol   *volume.Volume
 	fetch volume.Fetcher
+
+	// Statfs 容量信息（字节）。0 表示未同步，此时 df 回退到报缓存配额。
+	totalBytes uint64
+	freeBytes  uint64
+}
+
+func (f *FS) SetCapacity(total, free uint64) {
+	f.totalBytes = total
+	f.freeBytes = free
 }
 
 type rootNode struct {
@@ -115,12 +124,37 @@ func (n *fileNode) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAt
 	return 0
 }
 
+func (r *rootNode) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.Errno {
+	const bsize = 4096
+	out.Bsize = bsize
+	out.Frsize = bsize
+	total := r.f.totalBytes
+	free := r.f.freeBytes
+	if total == 0 {
+		// 未同步上游容量前：按缓存用量兜底，避免 df 显示全 0。
+		used, _ := r.f.vol.Usage()
+		total = uint64(used) + 1<<30
+		free = 1 << 30
+	}
+	out.Blocks = total / bsize
+	if free > total {
+		free = total
+	}
+	out.Bfree = free / bsize
+	out.Bavail = free / bsize
+	out.Files = 1 << 20
+	out.Ffree = 1 << 19
+	out.NameLen = 255
+	return 0
+}
+
 func New(vol *volume.Volume, fetch volume.Fetcher) *FS {
 	return &FS{vol: vol, fetch: fetch}
 }
 
 type Server struct {
 	srv *fuse.Server
+	fs  *FS
 }
 
 func Mount(mountpoint string, vol *volume.Volume, fetch volume.Fetcher) (*Server, error) {
@@ -132,8 +166,10 @@ func Mount(mountpoint string, vol *volume.Volume, fetch volume.Fetcher) (*Server
 	if err != nil {
 		return nil, err
 	}
-	return &Server{srv: srv}, nil
+	return &Server{srv: srv, fs: f}, nil
 }
+
+func FSRef(s *Server) *FS { return s.fs }
 
 func (s *Server) Close() {
 	s.srv.Unmount()

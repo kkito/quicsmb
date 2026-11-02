@@ -3,9 +3,12 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
+	"io"
 	"flag"
 	"log"
 	"os"
+	"syscall"
 	"time"
 
 	"quicsmb/internal/auth"
@@ -62,6 +65,9 @@ func run(ctx context.Context, server string, port int, key []byte, d *disk.Root)
 	if err := xfer.Encode(st, xfer.Msg{Op: xfer.OpFetchReq, File: "", Index: 0, Data: hello}); err != nil {
 		return err
 	}
+	if err := reportCapacity(st, d); err != nil {
+		return err
+	}
 	bs := chunk.DefaultBlockSize
 	for {
 		m, err := xfer.Decode(st)
@@ -86,4 +92,17 @@ func run(ctx context.Context, server string, port int, key []byte, d *disk.Root)
 			}
 		}
 	}
+}
+
+func reportCapacity(st io.Writer, d *disk.Root) error {
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(d.Abs(), &stat); err != nil {
+		return err
+	}
+	total := stat.Blocks * uint64(stat.Bsize)
+	free := stat.Bavail * uint64(stat.Bsize)
+	var payload [16]byte
+	binary.BigEndian.PutUint64(payload[0:8], total)
+	binary.BigEndian.PutUint64(payload[8:16], free)
+	return xfer.Encode(st, xfer.Msg{Op: xfer.OpStatfsReq, Data: payload[:]})
 }

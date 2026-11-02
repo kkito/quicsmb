@@ -17,6 +17,8 @@ type Volume struct {
 	cache     *cache.Cache
 	meta      *metastore.Store
 	sizes     map[string]int64
+	capTotal  uint64
+	capFree   uint64
 }
 
 func New(blockSize int, c *cache.Cache, meta *metastore.Store) *Volume {
@@ -93,6 +95,12 @@ func (v *Volume) WriteAt(file string, off int64, p []byte, nowUnix int64) (int, 
 }
 
 func (v *Volume) Usage() (int64, int) { return v.cache.Usage() }
+
+func (v *Volume) SetCapacity(total, free uint64) {
+	v.capTotal, v.capFree = total, free
+}
+
+func (v *Volume) Capacity() (uint64, uint64) { return v.capTotal, v.capFree }
 func (v *Volume) HitRate() float64    { return v.cache.HitRate() }
 func (v *Volume) DirtyCount() int     { return len(v.meta.List()) }
 

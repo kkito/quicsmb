@@ -69,6 +69,8 @@ func (r *Root) WriteAt(file string, off int64, data []byte) error {
 	return err
 }
 
+func (r *Root) Abs() string { return r.root }
+
 func (r *Root) Size(file string) int64 {
 	p, err := r.resolve(file)
 	if err != nil {

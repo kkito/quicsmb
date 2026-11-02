@@ -71,6 +71,7 @@ func main() {
 			log.Fatalf("mount: %v", err)
 		}
 		defer mnt.Close()
+		SetFSRef(mount.FSRef(mnt))
 		log.Printf("qvps: mounted %s", mountpoint)
 	}
 

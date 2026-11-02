@@ -2,16 +2,22 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
 	"io"
 	"log"
 
 	"github.com/quic-go/quic-go"
 
 	"quicsmb/internal/auth"
+	"quicsmb/internal/mount"
 	"quicsmb/internal/chunk"
 	"quicsmb/internal/volume"
 	"quicsmb/internal/xfer"
 )
+
+var fsRef *mount.FS
+
+func SetFSRef(f *mount.FS) { fsRef = f }
 
 func serveQUIC(c *quic.Conn, key []byte, vol *volume.Volume) {
 	defer c.CloseWithError(0, "")
@@ -64,6 +70,15 @@ func serveStream(st *quic.Stream, key []byte, vol *volume.Volume) {
 		case xfer.OpPushReq:
 			if err := xfer.Encode(st, xfer.Msg{Op: xfer.OpPushAck, File: m.File, Index: m.Index}); err != nil {
 				return
+			}
+		case xfer.OpStatfsReq:
+			if len(m.Data) == 16 {
+				total := binary.BigEndian.Uint64(m.Data[0:8])
+				free := binary.BigEndian.Uint64(m.Data[8:16])
+				vol.SetCapacity(total, free)
+				if fsRef != nil {
+					fsRef.SetCapacity(total, free)
+				}
 			}
 		}
 	}

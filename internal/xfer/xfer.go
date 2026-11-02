@@ -15,6 +15,8 @@ const (
 	OpFetchResp Op = 2
 	OpPushReq   Op = 3
 	OpPushAck   Op = 4
+	// OpStatfsReq 家里上报大盘容量（Data 载 statfsPayload: total u64be + free u64be）。
+	OpStatfsReq Op = 5
 )
 
 const (
@@ -62,7 +64,7 @@ func Decode(r io.Reader) (Msg, error) {
 		return m, err
 	}
 	op := Op(hdr[0])
-	if op != OpFetchReq && op != OpFetchResp && op != OpPushReq && op != OpPushAck {
+	if op != OpFetchReq && op != OpFetchResp && op != OpPushReq && op != OpPushAck && op != OpStatfsReq {
 		return m, fmt.Errorf("bad op: %d", hdr[0])
 	}
 	m.Op = op
