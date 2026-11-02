@@ -95,3 +95,27 @@ func (v *Volume) WriteAt(file string, off int64, p []byte, nowUnix int64) (int, 
 func (v *Volume) Usage() (int64, int) { return v.cache.Usage() }
 func (v *Volume) HitRate() float64    { return v.cache.HitRate() }
 func (v *Volume) DirtyCount() int     { return len(v.meta.List()) }
+
+func (v *Volume) Truncate(file string, size int64) {
+	if size < 0 {
+		size = 0
+	}
+	v.sizes[file] = size
+}
+
+func (v *Volume) TouchDirty(file string, nowUnix int64) error {
+	for idx := range v.dirtyBlocks(file) {
+		v.meta.MarkDirty(file, idx, 0, nowUnix)
+	}
+	return nil
+}
+
+func (v *Volume) dirtyBlocks(file string) map[uint64]bool {
+	out := map[uint64]bool{}
+	for _, e := range v.meta.List() {
+		if e.File == file {
+			out[e.Index] = true
+		}
+	}
+	return out
+}

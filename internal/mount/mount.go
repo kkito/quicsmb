@@ -1,5 +1,6 @@
 // Package mount 把 volume 暴露为 FUSE 文件系统（go-fuse Node API）。
-// 文件自动具现：Lookup 到不存在的名字即创建节点，读写走 volume。
+// Create 具现文件（直接在 root 下建节点，写走 volume 标脏），读写走 volume。
+// 暂不支持：子目录、rename、unlink（后续按需加）。
 package mount
 
 import (
@@ -28,20 +29,32 @@ type fileNode struct {
 	name string
 }
 
+func (r *rootNode) fillEntry(name string, out *fuse.EntryOut) {
+	out.SetAttrTimeout(0)
+	out.SetEntryTimeout(0)
+	out.Attr.FromStat(&syscall.Stat_t{
+		Mode:  syscall.S_IFREG | 0o644,
+		Size:  r.f.vol.Size(name),
+		Nlink: 1,
+	})
+}
+
 func (r *rootNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	if ch := r.GetChild(name); ch != nil {
+		r.fillEntry(name, out)
+		return ch, 0
+	}
+	return nil, syscall.ENOENT
+}
+
+func (r *rootNode) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (*fs.Inode, fs.FileHandle, uint32, syscall.Errno) {
 	ch := r.GetChild(name)
 	if ch == nil {
 		ch = r.NewPersistentInode(ctx, &fileNode{f: r.f, name: name}, fs.StableAttr{Mode: syscall.S_IFREG})
 		r.AddChild(name, ch, true)
 	}
-	out.SetAttrTimeout(0)
-	out.SetEntryTimeout(0)
-	out.Attr.FromStat(&syscall.Stat_t{
-		Mode: syscall.S_IFREG | 0o644,
-		Size: r.f.vol.Size(name),
-		Nlink: 1,
-	})
-	return ch, 0
+	r.fillEntry(name, out)
+	return ch, nil, 0, 0
 }
 
 func (r *rootNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
@@ -83,6 +96,23 @@ func (n *fileNode) Write(ctx context.Context, fh fs.FileHandle, data []byte, off
 		return 0, syscall.EIO
 	}
 	return uint32(m), 0
+}
+
+func (n *fileNode) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
+	// 只支持 truncate 缩小（写后定长场景）；放大走 Write 自然扩展。
+	if in.Valid&fuse.FATTR_SIZE != 0 {
+		cur := n.f.vol.Size(n.name)
+		if int64(in.Size) < cur {
+			n.f.vol.Truncate(n.name, int64(in.Size))
+		}
+		if err := n.f.vol.TouchDirty(n.name, nowUnix()); err != nil {
+			return syscall.EIO
+		}
+	}
+	out.Mode = syscall.S_IFREG | 0o644
+	out.Size = uint64(n.f.vol.Size(n.name))
+	out.Nlink = 1
+	return 0
 }
 
 func New(vol *volume.Volume, fetch volume.Fetcher) *FS {
