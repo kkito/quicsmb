@@ -31,6 +31,47 @@ var QuicsmbWeb = (() => {
   };
   customElements.define("qs-status", QsStatus);
 
+  // web/src/qs-qvfs.ts
+  function fmtBytes(n) {
+    if (!n) return "0 B";
+    const units = ["B", "KB", "MB", "GB", "TB"];
+    let v = n;
+    let i = 0;
+    while (v >= 1024 && i < units.length - 1) {
+      v /= 1024;
+      i++;
+    }
+    return (i === 0 ? v : v.toFixed(1)) + " " + units[i];
+  }
+  function fmtPct(r) {
+    return (r * 100).toFixed(1) + "%";
+  }
+  var QsQvfs = class extends HTMLElement {
+    timer = null;
+    connectedCallback() {
+      void this.refresh();
+      this.timer = setInterval(() => void this.refresh(), 2e3);
+    }
+    disconnectedCallback() {
+      if (this.timer) clearInterval(this.timer);
+      this.timer = null;
+    }
+    async refresh() {
+      try {
+        const j = await api("/api/status");
+        const q = j.data.qvfs;
+        if (!q) {
+          this.innerHTML = "";
+          return;
+        }
+        this.innerHTML = `<div class="qs-qvfs"><h2>qvfs \u7F13\u5B58</h2><div>\u7F13\u5B58\u5757: <span data-blocks>${q.blocks ?? 0}</span></div><div>\u7F13\u5B58\u7528\u91CF: <span data-used>${fmtBytes(q.usedBytes ?? 0)}</span></div><div>\u810F\u5757\u5F85\u56DE\u5199: <span data-dirty>${q.dirty ?? 0}</span></div><div>\u547D\u4E2D\u7387: <span data-hitrate>${fmtPct(q.hitRate ?? 0)}</span></div></div>`;
+      } catch (e) {
+        this.innerHTML = `<div class="qs-qvfs error">qvfs error: ${e.message}</div>`;
+      }
+    }
+  };
+  customElements.define("qs-qvfs", QsQvfs);
+
   // web/src/qs-sessions.ts
   function esc(s) {
     return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");

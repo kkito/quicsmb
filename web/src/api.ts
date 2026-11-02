@@ -11,11 +11,19 @@ export async function api<T = unknown>(path: string, opts?: RequestInit): Promis
   return j;
 }
 
+export interface QvfsData {
+  blocks: number;
+  usedBytes: number;
+  dirty: number;
+  hitRate: number;
+}
+
 export interface StatusData {
   mode: string;
   sessions: number;
   stats: { rxBytes: number; txBytes: number };
   version: string;
+  qvfs?: QvfsData;
 }
 
 export interface SessionEntry {
