@@ -18,7 +18,9 @@ type DirtyEntryView struct {
 }
 
 func DefaultPolicy() Policy {
-	return Policy{DelaySec: 72 * 3600, WinStartMin: 120, WinEndMin: 180, MaxFailures: 10}
+	// 默认即时同步：脏块产生后下个 tick 就推，全天窗口。
+	// 如需延迟回写（错峰），用 QVFS_DELAY_SEC / QVFS_WIN 覆盖。
+	return Policy{DelaySec: 0, WinStartMin: 0, WinEndMin: 1440, MaxFailures: 10}
 }
 
 func inWindow(nowUnix int64, p Policy) bool {
