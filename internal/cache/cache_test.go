@@ -22,6 +22,34 @@ func TestLRUEvictsOldest(t *testing.T) {
 	}
 }
 
+func TestEdgeCases(t *testing.T) {
+	c := New(512<<10, 512<<10)
+	if c.EvictOldest() {
+		t.Fatal("empty evict should be false")
+	}
+	if r := c.HitRate(); r != 0 {
+		t.Fatal("empty hitrate should be 0")
+	}
+	if c.Heat(chunk.ChunkID{File: "x", Index: 0}) != 0 {
+		t.Fatal("missing heat should be 0")
+	}
+	k := chunk.ChunkID{File: "f", Index: 0}
+	c.Put(k, []byte("a"))
+	c.Put(k, []byte("bb")) // 覆盖同 key
+	if used, n := c.Usage(); n != 1 || used != 2 {
+		t.Fatalf("overwrite usage = %d,%d", used, n)
+	}
+	if top := c.HeatTop(99); len(top) != 1 {
+		t.Fatalf("top over-limit = %+v", top)
+	}
+	if !c.EvictOldest() {
+		t.Fatal("evict should be true")
+	}
+	if _, n := c.Usage(); n != 0 {
+		t.Fatal("should be empty")
+	}
+}
+
 func TestHitRateAndHeat(t *testing.T) {
 	c := New(4*512<<10, 512<<10)
 	k := chunk.ChunkID{File: "f", Index: 0}

@@ -32,6 +32,18 @@ func TestWrongKeyFailsIndistinguishably(t *testing.T) {
 	}
 }
 
+func TestSealShortNoncePadded(t *testing.T) {
+	n, _ := Nonce16()
+	msg := Seal([]byte("k"), n[:4], []byte("p"))
+	p, ok := Open([]byte("k"), msg)
+	if !ok || string(p) != "p" {
+		t.Fatalf("padded nonce open = %q,%v", p, ok)
+	}
+	if len(n) != 16 {
+		t.Fatal("nonce should be 16 bytes")
+	}
+}
+
 func TestBlackholeWritesNothing(t *testing.T) {
 	var w blackholeWriter
 	n, _ := Nonce16()
