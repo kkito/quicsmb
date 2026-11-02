@@ -21,6 +21,9 @@ const (
 	// OpListReq VPS 索要文件列表；OpListResp 家里回 Data=listPayload。
 	OpListReq  Op = 6
 	OpListResp Op = 7
+	// OpTruncReq VPS 通知家里把文件截断到真实大小（Data = size u64be）。
+	// PushReq 推的是整块（512KB 补零），不截的话家里文件会被补零撑大。
+	OpTruncReq Op = 8
 )
 
 const (
@@ -68,7 +71,7 @@ func Decode(r io.Reader) (Msg, error) {
 		return m, err
 	}
 	op := Op(hdr[0])
-	if op != OpFetchReq && op != OpFetchResp && op != OpPushReq && op != OpPushAck && op != OpStatfsReq && op != OpListReq && op != OpListResp {
+	if op != OpFetchReq && op != OpFetchResp && op != OpPushReq && op != OpPushAck && op != OpStatfsReq && op != OpListReq && op != OpListResp && op != OpTruncReq {
 		return m, fmt.Errorf("bad op: %d", hdr[0])
 	}
 	m.Op = op

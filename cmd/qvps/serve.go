@@ -171,6 +171,18 @@ func homeLoop(st *quic.Stream, vol *volume.Volume) {
 			if w != nil {
 				w <- listResp{data: m.Data}
 			}
+		case xfer.OpStatfsReq:
+			// 家里连上后上报的大盘容量（之前漏接：df 一直显示兜底 1G）
+			if len(m.Data) == 16 {
+				total := binary.BigEndian.Uint64(m.Data[0:8])
+				free := binary.BigEndian.Uint64(m.Data[8:16])
+				vol.SetCapacity(total, free)
+				if fsRef != nil {
+					fsRef.SetCapacity(total, free)
+				}
+			}
+		case xfer.OpTruncReq:
+			// 家里侧不需要（VPS 只发不收）
 		}
 	}
 }
@@ -235,6 +247,17 @@ func serveStream(st *quic.Stream, key []byte, vol *volume.Volume) {
 }
 
 func blockSize() int { return 512 << 10 }
+
+// truncViaHome 通知家里把文件截到真实大小（PushReq 是整块补零写）。
+func truncViaHome(file string, size int64) error {
+	h := getHome()
+	if h == nil {
+		return io.ErrUnexpectedEOF
+	}
+	var payload [8]byte
+	binary.BigEndian.PutUint64(payload[:], uint64(size))
+	return h.write(xfer.Msg{Op: xfer.OpTruncReq, File: file, Data: payload[:]})
+}
 
 // requestFileList 向家里索要文件列表（目录同步），60s 超时。
 func requestFileList() ([]xfer.FileEntry, error) {

@@ -94,6 +94,13 @@ func run(ctx context.Context, server string, port int, key []byte, d *disk.Root)
 			if err := xfer.Encode(st, xfer.Msg{Op: xfer.OpPushAck, File: m.File, Index: m.Index}); err != nil {
 				return err
 			}
+		case xfer.OpTruncReq:
+			if len(m.Data) == 8 {
+				sz := int64(binary.BigEndian.Uint64(m.Data))
+				if err := d.Truncate(m.File, sz); err != nil {
+					return err
+				}
+			}
 		case xfer.OpListReq:
 			files, err := d.List()
 			if err != nil {

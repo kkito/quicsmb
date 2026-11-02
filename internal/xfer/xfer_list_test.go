@@ -38,3 +38,18 @@ func TestListRoundTrip(t *testing.T) {
 		t.Fatal("want name-too-long")
 	}
 }
+
+func TestTruncReqOpRoundTrip(t *testing.T) {
+	// Op 8 编解码走通（含 8 字节 size payload）
+	var buf bytes.Buffer
+	if err := Encode(&buf, Msg{Op: OpTruncReq, File: "a.txt", Data: []byte{0, 0, 0, 0, 0, 0, 0, 26}}); err != nil {
+		t.Fatal(err)
+	}
+	m, err := Decode(&buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Op != OpTruncReq || m.File != "a.txt" || len(m.Data) != 8 {
+		t.Fatalf("msg = %+v", m)
+	}
+}

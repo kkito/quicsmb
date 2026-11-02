@@ -128,6 +128,7 @@ func writebackLoop(vol *volume.Volume, meta *metastore.Store, pol writeback.Poli
 	defer tick.Stop()
 	for range tick.C {
 		now := time.Now().Unix()
+			trunced := map[string]bool{}
 			for _, b := range vol.FlushDue(pol, func() int64 { return now }, 32) {
 				if err := pushBlock(b.File, b.Index, b.Data); err != nil {
 					meta.BumpFailure(b.File, b.Index)
@@ -135,6 +136,12 @@ func writebackLoop(vol *volume.Volume, meta *metastore.Store, pol writeback.Poli
 					continue
 				}
 				meta.MarkClean(b.File, b.Index)
+				if !trunced[b.File] {
+					trunced[b.File] = true
+					if err := truncViaHome(b.File, vol.Size(b.File)); err != nil {
+						log.Printf("qvps: trunc %s: %v", b.File, err)
+					}
+				}
 			}
 			if err := meta.Save(); err != nil {
 				log.Printf("qvps: metastore save: %v", err)

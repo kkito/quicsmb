@@ -114,3 +114,20 @@ func (r *Root) List() ([]FileEntry, error) {
 	})
 	return out, err
 }
+
+// Truncate 把文件截到 size（回写时把块补零撑大的部分裁掉）。
+func (r *Root) Truncate(file string, size int64) error {
+	p, err := r.resolve(file)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(p, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return f.Truncate(size)
+}
