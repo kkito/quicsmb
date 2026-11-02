@@ -38,7 +38,7 @@ func fetchViaHome(file string, index uint64) ([]byte, error) {
 	if err := h.write(xfer.Msg{Op: xfer.OpFetchReq, File: file, Index: index}); err != nil {
 		h.pendMu.Lock()
 		delete(h.pend, k)
-			h.pendMu.Unlock()
+		h.pendMu.Unlock()
 		return nil, err
 	}
 	select {
@@ -47,7 +47,7 @@ func fetchViaHome(file string, index uint64) ([]byte, error) {
 	case <-time.After(60 * time.Second):
 		h.pendMu.Lock()
 		delete(h.pend, k)
-			h.pendMu.Unlock()
+		h.pendMu.Unlock()
 		return nil, io.ErrUnexpectedEOF
 	}
 }
@@ -66,7 +66,7 @@ func pushViaHome(m xfer.Msg) error {
 	if err := h.write(m); err != nil {
 		h.ackMu.Lock()
 		delete(h.acks, k)
-			h.ackMu.Unlock()
+		h.ackMu.Unlock()
 		return err
 	}
 	select {
@@ -98,14 +98,28 @@ func pendKey(file string, index uint64) string {
 }
 
 type homeConn struct {
-	st     *quic.Stream
-	mu     sync.Mutex
-	pendMu sync.Mutex
-	pend   map[string]chan fetchResp // FetchResp 等待者（按 file#index）
-	ackMu  sync.Mutex
-	acks   map[string]chan error // PushAck 等待者（按 file#index）
-	listMu sync.Mutex
-	listCh chan listResp // OpListResp 等待者（同时只允许一个在途）
+	st       *quic.Stream
+	mu       sync.Mutex
+	pendMu   sync.Mutex
+	pend     map[string]chan fetchResp // FetchResp 等待者（按 file#index）
+	ackMu    sync.Mutex
+	acks     map[string]chan error // PushAck 等待者（按 file#index）
+	listMu   sync.Mutex
+	listCh   chan listResp // OpListResp 等待者（同时只允许一个在途）
+	dirMu    sync.Mutex
+	dirPend  map[string]chan dirResp // OpReaddirResp 等待者（按目录）
+	statMu   sync.Mutex
+	statPend map[string]chan statResp // OpStatResp 等待者（按路径）
+}
+
+type dirResp struct {
+	data []byte
+	err  error
+}
+
+type statResp struct {
+	data []byte
+	err  error
 }
 
 type listResp struct {
@@ -138,7 +152,7 @@ func (h *homeConn) write(m xfer.Msg) error {
 // 回写调度经此发 PushReq 落盘；读泵按 Index 分发 FetchResp/PushAck。
 // （设计 §2: 回源与回写都由 VPS 发起、家里响应）
 func homeLoop(st *quic.Stream, vol *volume.Volume) {
-	h := &homeConn{st: st, pend: map[string]chan fetchResp{}, acks: map[string]chan error{}}
+	h := &homeConn{st: st, pend: map[string]chan fetchResp{}, acks: map[string]chan error{}, dirPend: map[string]chan dirResp{}, statPend: map[string]chan statResp{}}
 	setHome(h)
 	defer setHome(nil)
 	for {
@@ -170,6 +184,22 @@ func homeLoop(st *quic.Stream, vol *volume.Volume) {
 			h.listMu.Unlock()
 			if w != nil {
 				w <- listResp{data: m.Data}
+			}
+		case xfer.OpReaddirResp:
+			h.dirMu.Lock()
+			w := h.dirPend[m.File]
+			delete(h.dirPend, m.File)
+			h.dirMu.Unlock()
+			if w != nil {
+				w <- dirResp{data: m.Data}
+			}
+		case xfer.OpStatResp:
+			h.statMu.Lock()
+			ws := h.statPend[m.File]
+			delete(h.statPend, m.File)
+			h.statMu.Unlock()
+			if ws != nil {
+				ws <- statResp{data: m.Data}
 			}
 		case xfer.OpStatfsReq:
 			// 家里连上后上报的大盘容量（之前漏接：df 一直显示兜底 1G）
@@ -273,7 +303,7 @@ func requestFileList() ([]xfer.FileEntry, error) {
 	if err := h.write(xfer.Msg{Op: xfer.OpListReq}); err != nil {
 		h.listMu.Lock()
 		h.listCh = nil
-			h.listMu.Unlock()
+		h.listMu.Unlock()
 		return nil, err
 	}
 	select {
@@ -282,7 +312,7 @@ func requestFileList() ([]xfer.FileEntry, error) {
 	case <-time.After(60 * time.Second):
 		h.listMu.Lock()
 		h.listCh = nil
-			h.listMu.Unlock()
+		h.listMu.Unlock()
 		return nil, io.ErrUnexpectedEOF
 	}
 }
@@ -296,5 +326,63 @@ func syncFileList(vol *volume.Volume) {
 	}
 	for _, e := range list {
 		vol.SetFile(e.Name, e.Size)
+	}
+}
+
+// readdirViaHome 按需问家里“某一级目录下有什么”，只读一层，跟全盘文件数无关。
+func readdirViaHome(dir string) ([]xfer.DirEnt, error) {
+	h := getHome()
+	if h == nil {
+		return nil, io.ErrUnexpectedEOF
+	}
+	ch := make(chan dirResp, 1)
+	h.dirMu.Lock()
+	h.dirPend[dir] = ch
+	h.dirMu.Unlock()
+	if err := h.write(xfer.Msg{Op: xfer.OpReaddirReq, File: dir}); err != nil {
+		h.dirMu.Lock()
+		delete(h.dirPend, dir)
+		h.dirMu.Unlock()
+		return nil, err
+	}
+	select {
+	case r := <-ch:
+		return xfer.DecodeDir(r.data)
+	case <-time.After(60 * time.Second):
+		h.dirMu.Lock()
+		delete(h.dirPend, dir)
+		h.dirMu.Unlock()
+		return nil, io.ErrUnexpectedEOF
+	}
+}
+
+// statViaHome 按需问家里单个路径的状态（Lookup/Getattr 用）。
+func statViaHome(name string) (isDir bool, size int64, ok bool) {
+	h := getHome()
+	if h == nil {
+		return false, 0, false
+	}
+	ch := make(chan statResp, 1)
+	h.statMu.Lock()
+	h.statPend[name] = ch
+	h.statMu.Unlock()
+	if err := h.write(xfer.Msg{Op: xfer.OpStatReq, File: name}); err != nil {
+		h.statMu.Lock()
+		delete(h.statPend, name)
+		h.statMu.Unlock()
+		return false, 0, false
+	}
+	select {
+	case r := <-ch:
+		isDir, size, err := xfer.DecodeStat(r.data)
+		if err != nil {
+			return false, 0, false
+		}
+		return isDir, size, true
+	case <-time.After(60 * time.Second):
+		h.statMu.Lock()
+		delete(h.statPend, name)
+		h.statMu.Unlock()
+		return false, 0, false
 	}
 }

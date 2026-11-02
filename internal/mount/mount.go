@@ -1,6 +1,8 @@
 // Package mount 把 volume 暴露为 FUSE 文件系统（go-fuse Node API）。
-// Create 具现文件（直接在 root 下建节点，写走 volume 标脏），读写走 volume。
-// 暂不支持：子目录、rename、unlink（后续按需加）。
+// 按需目录：Readdir/Lookup/Getattr 实时问家里（经 Resolver），
+// 只读当前进的这一层，跟家里全盘文件数无关。
+// 本地新建/已同步的文件走 volume（读缓存/回源、写标脏即时回写）。
+// 暂不支持：rename、unlink（后续按需加）。
 package mount
 
 import (
@@ -14,9 +16,25 @@ import (
 	"quicsmb/internal/volume"
 )
 
+// DirEnt 是 Resolver 返回的单级目录项。
+type DirEnt struct {
+	Name  string
+	Size  int64
+	IsDir bool
+}
+
+// Resolver 按需解析远端目录/文件状态（qvps 侧经 QUIC 问家里实现）。
+type Resolver interface {
+	// Readdir 列单级目录（""=根），只读一层。
+	Readdir(dir string) ([]DirEnt, error)
+	// Stat 查单个路径：ok=false 表示远端不存在（或家里离线）。
+	Stat(name string) (isDir bool, size int64, ok bool)
+}
+
 type FS struct {
 	vol   *volume.Volume
 	fetch volume.Fetcher
+	res    Resolver
 
 	// Statfs 容量信息（字节）。0 表示未同步，此时 df 回退到报缓存配额。
 	totalBytes uint64
@@ -42,7 +60,7 @@ type dirNode struct {
 }
 
 // childrenOf 列 dir 下的直接子项（文件 + 子目录），来源：
-// volume 文件列表（目录同步/本地创建/重启恢复）+ 已具现节点。
+// volume 本地文件（新建/写过/重启恢复）+ Resolver 远端实时列表。
 func (f *FS) childrenOf(dir string) (files, dirs map[string]bool) {
 	files = map[string]bool{}
 	dirs = map[string]bool{}
@@ -63,15 +81,42 @@ func (f *FS) childrenOf(dir string) (files, dirs map[string]bool) {
 			dirs[rest[:i]] = true
 		}
 	}
+	if f.res != nil {
+		if des, err := f.res.Readdir(dir); err == nil {
+			for _, de := range des {
+				if de.IsDir {
+					dirs[de.Name] = true
+				} else {
+					// 本地写过的新版本 size 以 volume 为准（SetFile 只放大不缩小，
+					// 且 Readdir 进来时顺手把远端 size 记下来供 Getattr 用）
+						full := de.Name
+						if dir != "" {
+							full = dir + "/" + de.Name
+						}
+						if _, known := f.vol.Files()[full]; !known {
+							f.vol.SetFile(full, de.Size)
+						}
+						files[de.Name] = true
+				}
+			}
+		}
+	}
 	return files, dirs
 }
 
 func (f *FS) fillFileEntry(name string, out *fuse.EntryOut) {
+	sz := f.vol.Size(name)
+	if sz == 0 && f.res != nil {
+		if isDir, rsz, ok := f.res.Stat(name); ok && !isDir && rsz > 0 {
+			f.vol.SetFile(name, rsz)
+			sz = rsz
+		}
+	}
 	out.SetAttrTimeout(0)
 	out.SetEntryTimeout(0)
 	out.Attr.FromStat(&syscall.Stat_t{
 		Mode:  syscall.S_IFREG | 0o644,
-		Size:  f.vol.Size(name),
+		Size:  sz,
 		Nlink: 1,
 	})
 }
@@ -103,6 +148,16 @@ func (d *dirNode) lookupChild(ctx context.Context, name string, out *fuse.EntryO
 	}
 	full := d.fullName(name)
 	files, dirs := d.f.childrenOf(d.dir)
+	if !files[name] && !dirs[name] && d.f.res != nil {
+		// 本地没见过：实时问家里（家里离线则 ok=false，继续 ENOENT）
+		if isDir, _, ok := d.f.res.Stat(full); ok {
+			if isDir {
+				dirs[name] = true
+			} else {
+				files[name] = true
+			}
+		}
+	}
 	if files[name] {
 		ch := d.NewPersistentInode(ctx, &fileNode{f: d.f, name: full}, fs.StableAttr{Mode: syscall.S_IFREG})
 		d.AddChild(name, ch, true)
@@ -166,8 +221,15 @@ func (d *dirNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 type rootNode = dirNode
 
 func (n *fileNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
+	sz := n.f.vol.Size(n.name)
+	if sz == 0 && n.f.res != nil {
+		if isDir, rsz, ok := n.f.res.Stat(n.name); ok && !isDir && rsz > 0 {
+			n.f.vol.SetFile(n.name, rsz)
+			sz = rsz
+		}
+	}
 	out.Mode = syscall.S_IFREG | 0o644
-	out.Size = uint64(n.f.vol.Size(n.name))
+	out.Size = uint64(sz)
 	out.Nlink = 1
 	return 0
 }
@@ -237,6 +299,11 @@ func New(vol *volume.Volume, fetch volume.Fetcher) *FS {
 	return &FS{vol: vol, fetch: fetch}
 }
 
+// NewWithResolver 带远端按需解析器（qvps 传入经 QUIC 问家里的实现）。
+func NewWithResolver(vol *volume.Volume, fetch volume.Fetcher, res Resolver) *FS {
+	return &FS{vol: vol, fetch: fetch, res: res}
+}
+
 type Server struct {
 	srv *fuse.Server
 	fs  *FS
@@ -244,6 +311,19 @@ type Server struct {
 
 func Mount(mountpoint string, vol *volume.Volume, fetch volume.Fetcher) (*Server, error) {
 	f := New(vol, fetch)
+	root := &rootNode{f: f}
+	srv, err := fs.Mount(mountpoint, root, &fs.Options{
+		MountOptions: fuse.MountOptions{AllowOther: true, Name: "qvfs"},
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &Server{srv: srv, fs: f}, nil
+}
+
+// MountWithResolver 同 Mount，另带远端按需解析器。
+func MountWithResolver(mountpoint string, vol *volume.Volume, fetch volume.Fetcher, res Resolver) (*Server, error) {
+	f := NewWithResolver(vol, fetch, res)
 	root := &rootNode{f: f}
 	srv, err := fs.Mount(mountpoint, root, &fs.Options{
 		MountOptions: fuse.MountOptions{AllowOther: true, Name: "qvfs"},

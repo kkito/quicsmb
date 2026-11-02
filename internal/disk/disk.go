@@ -145,3 +145,65 @@ func (r *Root) Truncate(file string, size int64) error {
 	defer f.Close()
 	return f.Truncate(size)
 }
+
+// ReadDir 列单级目录（相对路径，""=根）：只读一层，不递归，跟全盘文件数无关。
+// 无权限/不存在返回空表 + nil（调用方按空目录处理）；逃逸返回 error。
+func (r *Root) ReadDir(dir string) ([]FileEntryDir, error) {
+	var rel string
+	if dir != "" {
+		if strings.HasPrefix(dir, "/") {
+			return nil, errors.New("bad path: " + dir)
+		}
+		rel = filepath.Clean(dir)
+		if rel == ".." || strings.HasPrefix(rel, "../") {
+			return nil, errors.New("path escape: " + dir)
+		}
+	}
+	p := filepath.Join(r.root, rel)
+	des, err := os.ReadDir(p)
+	if err != nil {
+		if os.IsNotExist(err) || os.IsPermission(err) {
+			return nil, nil
+		}
+		return nil, nil // 其他 IO 错也按空目录处理，保证 ls 不炸
+	}
+	out := make([]FileEntryDir, 0, len(des))
+	for _, de := range des {
+		if de.Type()&fs.ModeSymlink != 0 {
+			continue
+		}
+		e := FileEntryDir{Name: de.Name(), IsDir: de.IsDir()}
+		if !de.IsDir() {
+			if info, err := de.Info(); err == nil && info.Mode().IsRegular() {
+				e.Size = info.Size()
+			} else if err == nil && !info.Mode().IsRegular() {
+				continue
+			}
+		}
+		out = append(out, e)
+	}
+	return out, nil
+}
+
+// FileEntryDir 是单级目录的一项（与 xfer.DirEnt 对齐，不依赖 xfer）。
+type FileEntryDir struct {
+	Name  string
+	Size  int64
+	IsDir bool
+}
+
+// Stat 单文件/目录状态：不存在返回 found=false。
+func (r *Root) Stat(name string) (isDir bool, size int64, found bool) {
+	p, err := r.resolve(name)
+	if err != nil {
+		return false, 0, false
+	}
+	st, err := os.Stat(p) // 跟随符号链接即可，家里是自己人
+	if err != nil {
+		return false, 0, false
+	}
+	if st.IsDir() {
+		return true, 0, true
+	}
+	return false, st.Size(), true
+}

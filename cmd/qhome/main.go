@@ -4,8 +4,8 @@ package main
 import (
 	"context"
 	"encoding/binary"
-	"io"
 	"flag"
+	"io"
 	"log"
 	"os"
 	"syscall"
@@ -100,6 +100,27 @@ func run(ctx context.Context, server string, port int, key []byte, d *disk.Root)
 				if err := d.Truncate(m.File, sz); err != nil {
 					return err
 				}
+			}
+		case xfer.OpReaddirReq:
+			des, err := d.ReadDir(m.File)
+			if err != nil {
+				return err
+			}
+			es := make([]xfer.DirEnt, 0, len(des))
+			for _, de := range des {
+				es = append(es, xfer.DirEnt{Name: de.Name, Size: de.Size, IsDir: de.IsDir})
+			}
+			payload, err := xfer.EncodeDir(es)
+			if err != nil {
+				return err
+			}
+			if err := xfer.Encode(st, xfer.Msg{Op: xfer.OpReaddirResp, File: m.File, Data: payload}); err != nil {
+				return err
+			}
+		case xfer.OpStatReq:
+			isDir, size, _ := d.Stat(m.File)
+			if err := xfer.Encode(st, xfer.Msg{Op: xfer.OpStatResp, File: m.File, Data: xfer.EncodeStat(isDir, size)}); err != nil {
+				return err
 			}
 		case xfer.OpListReq:
 			files, err := d.List()

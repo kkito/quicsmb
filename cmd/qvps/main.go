@@ -68,7 +68,7 @@ func main() {
 
 	var mnt *mount.Server
 	if mountpoint != "" {
-		mnt, err = mount.Mount(mountpoint, vol, fetchViaHome)
+		mnt, err = mount.MountWithResolver(mountpoint, vol, fetchViaHome, &homeResolver{})
 		if err != nil {
 			log.Fatalf("mount: %v", err)
 		}
@@ -168,3 +168,22 @@ func syncLoop(vol *Volume) {
 }
 
 type Volume = volume.Volume
+
+// homeResolver 把 mount 的按需目录解析接到 QUIC（问家里）。
+type homeResolver struct{}
+
+func (homeResolver) Readdir(dir string) ([]mount.DirEnt, error) {
+	des, err := readdirViaHome(dir)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]mount.DirEnt, 0, len(des))
+	for _, de := range des {
+		out = append(out, mount.DirEnt{Name: de.Name, Size: de.Size, IsDir: de.IsDir})
+	}
+	return out, nil
+}
+
+func (homeResolver) Stat(name string) (bool, int64, bool) {
+	return statViaHome(name)
+}
