@@ -56,7 +56,7 @@ func Listen(port int, alpn, certFile, keyFile string) (*quic.Listener, error) {
 		Certificates: []tls.Certificate{cert},
 		NextProtos:   []string{alpn},
 	}
-	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	addr := fmt.Sprintf(":%d", port)
 	l, err := quic.ListenAddr(addr, tlsConf, quicConfig())
 	if err != nil {
 		return nil, err
