@@ -62,6 +62,9 @@ type dirNode struct {
 // childrenOf 列 dir 下的直接子项（文件 + 子目录），来源：
 // volume 本地文件（新建/写过/重启恢复）+ Resolver 远端实时列表。
 func (f *FS) childrenOf(dir string) (files, dirs map[string]bool) {
+	defer func() {
+		_ = recover() // resolver 异常不炸 ls，降级为本地列表
+	}()
 	files = map[string]bool{}
 	dirs = map[string]bool{}
 	prefix := dir
@@ -83,6 +86,7 @@ func (f *FS) childrenOf(dir string) (files, dirs map[string]bool) {
 	}
 	if f.res != nil {
 		if des, err := f.res.Readdir(dir); err == nil {
+			_ = err
 			for _, de := range des {
 				if de.IsDir {
 					dirs[de.Name] = true

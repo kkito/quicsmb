@@ -44,7 +44,7 @@ func fetchViaHome(file string, index uint64) ([]byte, error) {
 	select {
 	case r := <-resp:
 		return r.data, r.err
-	case <-time.After(60 * time.Second):
+	case <-time.After(30 * time.Second):
 		h.pendMu.Lock()
 		delete(h.pend, k)
 		h.pendMu.Unlock()
@@ -72,7 +72,7 @@ func pushViaHome(m xfer.Msg) error {
 	select {
 	case err := <-ack:
 		return err
-	case <-time.After(60 * time.Second):
+	case <-time.After(30 * time.Second):
 		h.ackMu.Lock()
 		delete(h.acks, k)
 		h.ackMu.Unlock()
@@ -138,7 +138,14 @@ func getHome() *homeConn {
 func (h *homeConn) write(m xfer.Msg) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return xfer.Encode(h.st, m)
+	done := make(chan error, 1)
+	go func() { done <- xfer.Encode(h.st, m) }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(30 * time.Second):
+		return io.ErrUnexpectedEOF // 写阻塞：stream 背压，让 FUSE EIO 而不是卡死
+	}
 }
 
 // homeLoop 是 qhome 连接的常驻循环：VPS 侧 fetch 经此发 FetchReq 读大盘，
@@ -294,7 +301,7 @@ func readdirViaHome(dir string) ([]xfer.DirEnt, error) {
 	select {
 	case r := <-ch:
 		return xfer.DecodeDir(r.data)
-	case <-time.After(60 * time.Second):
+	case <-time.After(15 * time.Second):
 		h.dirMu.Lock()
 		delete(h.dirPend, dir)
 		h.dirMu.Unlock()
@@ -325,7 +332,7 @@ func statViaHome(name string) (isDir bool, size int64, ok bool) {
 			return false, 0, false
 		}
 		return isDir, size, true
-	case <-time.After(60 * time.Second):
+	case <-time.After(10 * time.Second):
 		h.statMu.Lock()
 		delete(h.statPend, name)
 		h.statMu.Unlock()
