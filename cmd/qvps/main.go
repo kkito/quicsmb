@@ -4,9 +4,9 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
-	"fmt"
 	"os"
 	"strconv"
 	"time"
@@ -82,7 +82,6 @@ func main() {
 		log.Fatalf("listen: %v", err)
 	}
 	go writebackLoop(vol, meta, writebackPolicyFromEnv())
-	go syncLoop(vol)
 	go func() {
 		for {
 			c, err := lis.Accept(context.Background())
@@ -107,12 +106,12 @@ func writebackPolicyFromEnv() writeback.Policy {
 		}
 	}
 	if s := os.Getenv("QVFS_WIN"); s != "" {
-			var a, b int
-			if n, _ := fmt.Sscanf(s, "%d-%d", &a, &b); n == 2 {
-				p.WinStartMin, p.WinEndMin = a, b
-			}
-		_ = a
+		var a, b int
+		if n, _ := fmt.Sscanf(s, "%d-%d", &a, &b); n == 2 {
+			p.WinStartMin, p.WinEndMin = a, b
 		}
+		_ = a
+	}
 	return p
 }
 
@@ -128,43 +127,32 @@ func writebackLoop(vol *volume.Volume, meta *metastore.Store, pol writeback.Poli
 	defer tick.Stop()
 	for range tick.C {
 		now := time.Now().Unix()
-			trunced := map[string]bool{}
-			for _, b := range vol.FlushDue(pol, func() int64 { return now }, 32) {
-				if err := pushBlock(b.File, b.Index, b.Data); err != nil {
-					meta.BumpFailure(b.File, b.Index)
-					log.Printf("qvps: push %s#%d: %v", b.File, b.Index, err)
-					continue
-				}
-				meta.MarkClean(b.File, b.Index)
-				if !trunced[b.File] {
-					trunced[b.File] = true
-					sz := vol.Size(b.File)
-					if err := truncViaHome(b.File, sz); err != nil {
-						log.Printf("qvps: trunc %s size=%d: %v", b.File, sz, err)
-					} else {
-						log.Printf("qvps: pushed %s size=%d", b.File, sz)
-					}
-				}
+		trunced := map[string]bool{}
+		for _, b := range vol.FlushDue(pol, func() int64 { return now }, 32) {
+			if err := pushBlock(b.File, b.Index, b.Data); err != nil {
+				meta.BumpFailure(b.File, b.Index)
+				log.Printf("qvps: push %s#%d: %v", b.File, b.Index, err)
+				continue
 			}
-			if err := meta.Save(); err != nil {
-				log.Printf("qvps: metastore save: %v", err)
+			meta.MarkClean(b.File, b.Index)
+			if !trunced[b.File] {
+				trunced[b.File] = true
+				sz := vol.Size(b.File)
+				if err := truncViaHome(b.File, sz); err != nil {
+					log.Printf("qvps: trunc %s size=%d: %v", b.File, sz, err)
+				} else {
+					log.Printf("qvps: pushed %s size=%d", b.File, sz)
+				}
 			}
 		}
+		if err := meta.Save(); err != nil {
+			log.Printf("qvps: metastore save: %v", err)
+		}
+	}
 }
 
 func pushBlock(file string, index uint64, data []byte) error {
 	return pushViaHome(xfer.Msg{Op: xfer.OpPushReq, File: file, Index: index, Data: data})
-}
-// syncLoop 等家里连上后拉文件列表 + 容量；之后每 5 分钟重同步一次。
-// （P1-5 目录同步 + P2-12 容量刷新）
-func syncLoop(vol *Volume) {
-	for {
-		time.Sleep(30 * time.Second)
-		if getHome() == nil {
-			continue
-		}
-		syncFileList(vol)
-	}
 }
 
 type Volume = volume.Volume

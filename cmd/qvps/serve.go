@@ -104,8 +104,6 @@ type homeConn struct {
 	pend     map[string]chan fetchResp // FetchResp 等待者（按 file#index）
 	ackMu    sync.Mutex
 	acks     map[string]chan error // PushAck 等待者（按 file#index）
-	listMu   sync.Mutex
-	listCh   chan listResp // OpListResp 等待者（同时只允许一个在途）
 	dirMu    sync.Mutex
 	dirPend  map[string]chan dirResp // OpReaddirResp 等待者（按目录）
 	statMu   sync.Mutex
@@ -118,11 +116,6 @@ type dirResp struct {
 }
 
 type statResp struct {
-	data []byte
-	err  error
-}
-
-type listResp struct {
 	data []byte
 	err  error
 }
@@ -176,14 +169,6 @@ func homeLoop(st *quic.Stream, vol *volume.Volume) {
 			h.ackMu.Unlock()
 			if w != nil {
 				w <- nil
-			}
-		case xfer.OpListResp:
-			h.listMu.Lock()
-			w := h.listCh
-			h.listCh = nil
-			h.listMu.Unlock()
-			if w != nil {
-				w <- listResp{data: m.Data}
 			}
 		case xfer.OpReaddirResp:
 			h.dirMu.Lock()
@@ -288,45 +273,6 @@ func truncViaHome(file string, size int64) error {
 	var payload [8]byte
 	binary.BigEndian.PutUint64(payload[:], uint64(size))
 	return h.write(xfer.Msg{Op: xfer.OpTruncReq, File: file, Data: payload[:]})
-}
-
-// requestFileList 向家里索要文件列表（目录同步），60s 超时。
-func requestFileList() ([]xfer.FileEntry, error) {
-	h := getHome()
-	if h == nil {
-		return nil, io.ErrUnexpectedEOF
-	}
-	ch := make(chan listResp, 1)
-	h.listMu.Lock()
-	h.listCh = ch
-	h.listMu.Unlock()
-	if err := h.write(xfer.Msg{Op: xfer.OpListReq}); err != nil {
-		h.listMu.Lock()
-		h.listCh = nil
-		h.listMu.Unlock()
-		return nil, err
-	}
-	select {
-	case r := <-ch:
-		return xfer.DecodeList(r.data)
-	case <-time.After(60 * time.Second):
-		h.listMu.Lock()
-		h.listCh = nil
-		h.listMu.Unlock()
-		return nil, io.ErrUnexpectedEOF
-	}
-}
-
-// syncFileList 拉家里列表 → volume.SetFile；失败只记日志，下轮继续。
-func syncFileList(vol *volume.Volume) {
-	list, err := requestFileList()
-	if err != nil {
-		log.Printf("qvps: filelist: %v", err)
-		return
-	}
-	for _, e := range list {
-		vol.SetFile(e.Name, e.Size)
-	}
 }
 
 // readdirViaHome 按需问家里“某一级目录下有什么”，只读一层，跟全盘文件数无关。
