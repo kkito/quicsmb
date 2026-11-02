@@ -5,6 +5,8 @@ package volume
 import (
 	"fmt"
 
+	"quicsmb/internal/writeback"
+
 	"quicsmb/internal/cache"
 	"quicsmb/internal/chunk"
 	"quicsmb/internal/metastore"
@@ -101,7 +103,32 @@ func (v *Volume) SetCapacity(total, free uint64) {
 }
 
 func (v *Volume) Capacity() (uint64, uint64) { return v.capTotal, v.capFree }
-func (v *Volume) HitRate() float64    { return v.cache.HitRate() }
+func (v *Volume) HitRate() float64 { return v.cache.HitRate() }
+
+// DirtyBlock 是待回写的一块脏数据快照（调用方推送后 MarkClean）。
+type DirtyBlock struct {
+	File  string
+	Index uint64
+	Data  []byte
+}
+
+func (v *Volume) FlushDue(pol writeback.Policy, now writeback.Clock, limit int) []DirtyBlock {
+	entries := v.meta.List()
+	views := make([]writeback.DirtyEntryView, len(entries))
+	for i, e := range entries {
+		views[i] = writeback.DirtyEntryView{DirtyUnix: e.DirtyUnix, Failures: e.Failures}
+	}
+	var out []DirtyBlock
+	for _, i := range writeback.SelectDue(views, pol, now, limit) {
+		e := entries[i]
+		b, ok := v.cache.Get(chunk.ChunkID{File: e.File, Index: e.Index})
+		if !ok {
+			continue // 块已被淘汰：跳过，留待下轮（校验和复核是后续工作）
+		}
+		out = append(out, DirtyBlock{File: e.File, Index: e.Index, Data: b})
+	}
+	return out
+}
 func (v *Volume) DirtyCount() int     { return len(v.meta.List()) }
 
 func (v *Volume) Truncate(file string, size int64) {

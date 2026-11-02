@@ -6,7 +6,13 @@ import (
 	"flag"
 	"log"
 	"net/http"
+	"fmt"
 	"os"
+	"strconv"
+	"time"
+
+	"quicsmb/internal/writeback"
+	"quicsmb/internal/xfer"
 
 	"quicsmb/internal/cache"
 	"quicsmb/internal/chunk"
@@ -79,6 +85,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("listen: %v", err)
 	}
+	go writebackLoop(vol, meta, writebackPolicyFromEnv())
 	go func() {
 		for {
 			c, err := lis.Accept(context.Background())
@@ -93,4 +100,51 @@ func main() {
 	mux := web.NewRouter(m, "qvfs", "qvps")
 	log.Printf("qvps: web %s quic %d", addr, port)
 	log.Fatal(http.ListenAndServe(addr, mux))
+}
+
+func writebackPolicyFromEnv() writeback.Policy {
+	p := writeback.DefaultPolicy()
+	if s := os.Getenv("QVFS_DELAY_SEC"); s != "" {
+		if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+			p.DelaySec = n
+		}
+	}
+	if s := os.Getenv("QVFS_WIN"); s != "" {
+			var a, b int
+			if n, _ := fmt.Sscanf(s, "%d-%d", &a, &b); n == 2 {
+				p.WinStartMin, p.WinEndMin = a, b
+			}
+		_ = a
+		}
+	return p
+}
+
+// writebackLoop 每分钟扫脏块（设计 §3）：到期且在窗口内 → 经 home 通道推家里落盘。
+func writebackLoop(vol *volume.Volume, meta *metastore.Store, pol writeback.Policy) {
+	interval := time.Minute
+	if s := os.Getenv("QVFS_TICK_SEC"); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n > 0 {
+			interval = time.Duration(n) * time.Second
+		}
+	}
+	tick := time.NewTicker(interval)
+	defer tick.Stop()
+	for range tick.C {
+		now := time.Now().Unix()
+			for _, b := range vol.FlushDue(pol, func() int64 { return now }, 32) {
+				if err := pushBlock(b.File, b.Index, b.Data); err != nil {
+					meta.BumpFailure(b.File, b.Index)
+					log.Printf("qvps: push %s#%d: %v", b.File, b.Index, err)
+					continue
+				}
+				meta.MarkClean(b.File, b.Index)
+			}
+			if err := meta.Save(); err != nil {
+				log.Printf("qvps: metastore save: %v", err)
+			}
+		}
+}
+
+func pushBlock(file string, index uint64, data []byte) error {
+	return pushViaHome(xfer.Msg{Op: xfer.OpPushReq, File: file, Index: index, Data: data})
 }

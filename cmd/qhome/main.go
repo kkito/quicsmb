@@ -76,6 +76,10 @@ func run(ctx context.Context, server string, port int, key []byte, d *disk.Root)
 		}
 		switch m.Op {
 		case xfer.OpFetchReq:
+			// statfs 上报帧（File==""）是 VPS 侧消费的，家里侧忽略
+			if m.File == "" {
+				continue
+			}
 			data, err := d.ReadAt(m.File, int64(m.Index)*int64(bs), bs)
 			if err != nil {
 				return err
